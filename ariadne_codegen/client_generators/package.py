@@ -641,10 +641,16 @@ def parallel_compute_operations(
 ) -> list[dict]:
     """Run _compute_operation in parallel using forked processes.
 
-    Falls back to sequential execution when there is only one query or when
-    fork is unavailable (e.g. Windows).
+    Falls back to sequential execution when:
+    - queries is empty (avoids max_workers=0 ValueError)
+    - plugins are active (plugin hooks mutate state in child processes that
+      the parent needs; fork does not propagate those mutations back)
+    - fork is unavailable (e.g. Windows)
     """
-    if os.name == "nt":
+    has_plugins = bool(
+        package_gen.plugin_manager and package_gen.plugin_manager.plugins
+    )
+    if not queries or os.name == "nt" or has_plugins:
         return [package_gen._compute_operation(q) for q in queries]
 
     global _fork_package_gen
