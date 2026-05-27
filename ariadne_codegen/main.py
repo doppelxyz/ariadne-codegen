@@ -3,7 +3,10 @@ import sys
 import click
 from graphql import assert_valid_schema
 
-from .client_generators.package import get_package_generator, parallel_compute_operations
+from .client_generators.package import (
+    get_package_generator,
+    parallel_compute_operations,
+)
 from .config import get_client_settings, get_config_dict, get_graphql_schema_settings
 from .graphql_schema_generators.schema import (
     generate_graphql_schema_graphql_file,
