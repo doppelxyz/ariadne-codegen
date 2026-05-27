@@ -60,7 +60,6 @@ jobs:
             --no-emit-warnings \
             --compress \
             --inherit-path=fallback \
-            --venv \
             --compile \
             -o ariadne-codegen
 
