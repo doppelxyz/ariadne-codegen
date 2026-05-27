@@ -1,5 +1,6 @@
 import ast
 import builtins
+import os
 import re
 import subprocess
 import sys
@@ -19,6 +20,22 @@ _TARGET_VERSION = "py310"
 _SUBPROCESS_TIMEOUT = 30
 # Generous per-file budget multiplied by file count for batch operations
 _BATCH_TIMEOUT_PER_FILE = 5
+
+
+def _ruff_env() -> dict[str, str]:
+    """Return an env dict that lets ruff subprocesses find bundled packages.
+
+    Inside a PEX the deps are extracted to disk and listed in sys.path, but
+    spawned subprocesses don't inherit those paths.  Exporting them via
+    PYTHONPATH makes ``python -m ruff`` work regardless of whether we are
+    running inside a PEX or a plain virtualenv.
+    """
+    env = os.environ.copy()
+    pex_paths = os.pathsep.join(p for p in sys.path if p)
+    if pex_paths:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = pex_paths + (os.pathsep + existing if existing else "")
+    return env
 
 
 def ast_to_raw_str(
@@ -54,6 +71,8 @@ def batch_format_files(
 
     timeout = max(_SUBPROCESS_TIMEOUT, _BATCH_TIMEOUT_PER_FILE * len(all_files))
 
+    ruff_env = _ruff_env()
+
     if files_with_f401:
         subprocess.run(
             [
@@ -74,6 +93,7 @@ def batch_format_files(
             check=False,
             capture_output=True,
             timeout=timeout,
+            env=ruff_env,
         )
 
     if files_without_f401:
@@ -96,6 +116,7 @@ def batch_format_files(
             check=False,
             capture_output=True,
             timeout=timeout,
+            env=ruff_env,
         )
 
     result = subprocess.run(
@@ -115,6 +136,7 @@ def batch_format_files(
         text=True,
         check=False,
         timeout=timeout,
+        env=ruff_env,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -140,6 +162,7 @@ def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:
     ) as f:
         f.write(code)
         tmp_path = f.name
+    ruff_env = _ruff_env()
     try:
         subprocess.run(
             [
@@ -160,6 +183,7 @@ def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:
             check=False,
             capture_output=True,
             timeout=_SUBPROCESS_TIMEOUT,
+            env=ruff_env,
         )
         code = Path(tmp_path).read_text(encoding="utf-8")
     finally:
@@ -183,6 +207,7 @@ def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:
         text=True,
         check=False,
         timeout=_SUBPROCESS_TIMEOUT,
+        env=ruff_env,
     )
     if result.returncode != 0:
         raise RuntimeError(
