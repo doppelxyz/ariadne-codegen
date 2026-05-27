@@ -8,7 +8,7 @@ name: Release PEX
 #
 # Consumers use tools/bin/ariadne-codegen (a dotslash entry) which downloads
 # the matching tar.gz and caches it automatically.  ariadne-plugins is
-# injected at runtime via PEX_PATH by the doppie CLI.
+# injected at runtime via PYTHONPATH (the PEX is built with --inherit-path=fallback).
 
 on:
   push:
@@ -59,6 +59,7 @@ jobs:
             -m ariadne_codegen \
             --no-emit-warnings \
             --compress \
+            --inherit-path=fallback \
             -o ariadne-codegen
 
           chmod +x ariadne-codegen
