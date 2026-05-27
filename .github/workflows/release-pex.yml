@@ -41,13 +41,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Setup Aikido Safe Chain
-        uses: ./.github/actions/setup-safe-chain
-
       - name: Install pex
-        # pex is a build tool (not a runtime dep); skip the age gate since we
-        # need the latest version and it is a well-audited packaging utility.
-        run: pip install "pex>=2.20,<3" --safe-chain-skip-minimum-package-age
+        run: pip install "pex>=2.20,<3"
 
       - name: Build PEX
         env:
