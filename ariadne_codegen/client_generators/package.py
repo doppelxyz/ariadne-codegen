@@ -1,5 +1,7 @@
 import ast
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -614,3 +616,43 @@ def get_package_generator(
         include_typename=settings.include_typename,
         ignore_extra_fields=settings.ignore_extra_fields,
     )
+
+
+# Module-level reference used by _compute_op_worker so that fork-based
+# ProcessPoolExecutor workers inherit it without pickling the heavy schema.
+_fork_package_gen: Optional["PackageGenerator"] = None
+
+
+def _compute_op_worker(definition: OperationDefinitionNode) -> dict:
+    """Worker executed in a forked child process.
+
+    _fork_package_gen is inherited from the parent via fork (copy-on-write),
+    so the GraphQLSchema and all generator state are free to use here.
+    Only the OperationDefinitionNode arg and the returned dict cross the
+    process boundary (via pickle over a pipe).
+    """
+    assert _fork_package_gen is not None
+    return _fork_package_gen._compute_operation(definition)
+
+
+def parallel_compute_operations(
+    package_gen: "PackageGenerator",
+    queries: list[OperationDefinitionNode],
+) -> list[dict]:
+    """Run _compute_operation in parallel using forked processes.
+
+    Falls back to sequential execution when there is only one query or when
+    fork is unavailable (e.g. Windows).
+    """
+    if os.name == "nt":
+        return [package_gen._compute_operation(q) for q in queries]
+
+    global _fork_package_gen
+    _fork_package_gen = package_gen
+    try:
+        ctx = multiprocessing.get_context("fork")
+        workers = min(len(queries), os.cpu_count() or 4)
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+            return list(pool.map(_compute_op_worker, queries))
+    finally:
+        _fork_package_gen = None
