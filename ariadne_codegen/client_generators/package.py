@@ -8,7 +8,13 @@ from ..codegen import generate_import_from
 from ..exceptions import ParsingError
 from ..plugins.manager import PluginManager
 from ..settings import ClientSettings, CommentsStrategy
-from ..utils import ast_to_str, process_name, str_to_pascal_case
+from ..utils import (
+    add_extra_to_base_model,
+    ast_to_raw_str,
+    batch_format_files,
+    process_name,
+    str_to_pascal_case,
+)
 from .arguments import ArgumentsGenerator
 from .client import ClientGenerator
 from .comments import get_comment
@@ -110,13 +116,20 @@ class PackageGenerator:
         self.custom_scalars = custom_scalars if custom_scalars else {}
         self.plugin_manager = plugin_manager
 
-        self._result_types_files: Dict[str, ast.Module] = {}
-        self._generated_files: List[str] = []
-        self._unpacked_fragments: Set[str] = set()
-        self._used_enums: List[str] = []
+        self._result_types_files: dict[str, ast.Module] = {}
+        self._generated_files: list[str] = []
+        self._unpacked_fragments: set[str] = set()
+        self._used_enums: list[str] = []
+        # Tracks files that need batch ruff formatting at end of generate()
+        self._format_with_f401: list[Path] = []
+        self._format_without_f401: list[Path] = []
 
     def generate(self) -> List[str]:
         """Generate package with graphql client."""
+        # Reset batch-format lists so generate() is idempotent if called again
+        self._format_with_f401 = []
+        self._format_without_f401 = []
+
         self._include_exceptions()
         self._validate_unique_file_names()
         if not self.package_path.exists():
@@ -129,7 +142,20 @@ class PackageGenerator:
         self._generate_enums()
         self._generate_init()
 
+        # Single batch ruff pass over all generated files instead of per-file calls.
+        batch_format_files(self._format_with_f401, self._format_without_f401)
+
         return sorted(self._generated_files)
+
+    def _write_generated_file(
+        self, file_path: Path, code: str, *, remove_unused_imports: bool = True
+    ) -> None:
+        """Write raw (unformatted) code and register it for batch ruff formatting."""
+        file_path.write_text(code)
+        if remove_unused_imports:
+            self._format_with_f401.append(file_path)
+        else:
+            self._format_without_f401.append(file_path)
 
     def add_operation(self, definition: OperationDefinitionNode):
         name = definition.name
@@ -212,12 +238,11 @@ class PackageGenerator:
     def _generate_client(self):
         client_file_path = self.package_path / f"{self.client_file_name}.py"
         client_module = self.client_generator.generate()
-        code = self._add_comments_to_code(
-            ast_to_str(client_module, multiline_strings=True), self.queries_source
-        )
+        raw = ast_to_raw_str(client_module, multiline_strings=True)
+        code = self._add_comments_to_code(raw, self.queries_source)
         if self.plugin_manager:
             code = self.plugin_manager.generate_client_code(code)
-        client_file_path.write_text(code)
+        self._write_generated_file(client_file_path, code, remove_unused_imports=True)
         self._generated_files.append(client_file_path.name)
         self._used_enums.extend(
             self.client_generator.arguments_generator.get_used_enums()
@@ -243,11 +268,11 @@ class PackageGenerator:
         else:
             module = self.enums_generator.generate(types_to_include=self._used_enums)
 
-        code = self._add_comments_to_code(ast_to_str(module), self.schema_source)
+        code = self._add_comments_to_code(ast_to_raw_str(module), self.schema_source)
         if self.plugin_manager:
             code = self.plugin_manager.generate_enums_code(code)
         enums_file_path = self.package_path / f"{self.enums_module_name}.py"
-        enums_file_path.write_text(code)
+        self._write_generated_file(enums_file_path, code, remove_unused_imports=True)
         self._generated_files.append(enums_file_path.name)
         self.init_generator.add_import(
             self.enums_generator.get_generated_public_names(), self.enums_module_name, 1
@@ -261,10 +286,12 @@ class PackageGenerator:
             module = self.input_types_generator.generate(types_to_include=used_inputs)
 
         input_types_file_path = self.package_path / f"{self.input_types_module_name}.py"
-        code = self._add_comments_to_code(ast_to_str(module), self.schema_source)
+        code = self._add_comments_to_code(ast_to_raw_str(module), self.schema_source)
         if self.plugin_manager:
             code = self.plugin_manager.generate_inputs_code(code)
-        input_types_file_path.write_text(code)
+        self._write_generated_file(
+            input_types_file_path, code, remove_unused_imports=True
+        )
         self._generated_files.append(input_types_file_path.name)
         self._used_enums.extend(self.input_types_generator.get_used_enums())
         self.init_generator.add_import(
@@ -276,10 +303,12 @@ class PackageGenerator:
     def _generate_result_types(self):
         for file_name, module in self._result_types_files.items():
             file_path = self.package_path / file_name
-            code = self._add_comments_to_code(ast_to_str(module), self.queries_source)
+            code = self._add_comments_to_code(
+                ast_to_raw_str(module), self.queries_source
+            )
             if self.plugin_manager:
                 code = self.plugin_manager.generate_result_types_code(code)
-            file_path.write_text(code)
+            self._write_generated_file(file_path, code, remove_unused_imports=True)
             self._generated_files.append(file_path.name)
 
     def _generate_fragments(self):
@@ -292,8 +321,8 @@ class PackageGenerator:
             exclude_names=self._unpacked_fragments
         )
         file_path = self.package_path / f"{self.fragments_module_name}.py"
-        code = self._add_comments_to_code(ast_to_str(module), self.queries_source)
-        file_path.write_text(code)
+        code = self._add_comments_to_code(ast_to_raw_str(module), self.queries_source)
+        self._write_generated_file(file_path, code, remove_unused_imports=True)
         self._generated_files.append(file_path.name)
         self._used_enums.extend(self.fragments_generator.get_used_enums())
         self.init_generator.add_import(
@@ -329,11 +358,44 @@ class PackageGenerator:
     def _generate_init(self):
         init_file_path = self.package_path / "__init__.py"
         init_module = self.init_generator.generate()
-        code = self._add_comments_to_code(ast_to_str(init_module, False))
+        code = self._add_comments_to_code(ast_to_raw_str(init_module))
         if self.plugin_manager:
             code = self.plugin_manager.generate_init_code(code)
-        init_file_path.write_text(code)
+        # skip F401: __init__.py uses re-export imports that look "unused" to ruff
+        self._write_generated_file(init_file_path, code, remove_unused_imports=False)
         self._generated_files.append(init_file_path.name)
+
+    def _generate_custom_queries(self):
+        assert self.custom_query_generator is not None
+        file_path = self.package_path / "custom_queries.py"
+        module = self.custom_query_generator.generate()
+        code = self._add_comments_to_code(ast_to_raw_str(module))
+        self._write_generated_file(file_path, code, remove_unused_imports=False)
+        self._generated_files.append(file_path.name)
+
+    def _generate_custom_mutations(self):
+        assert self.custom_mutation_generator is not None
+        file_path = self.package_path / "custom_mutations.py"
+        module = self.custom_mutation_generator.generate()
+        code = self._add_comments_to_code(ast_to_raw_str(module))
+        self._write_generated_file(file_path, code, remove_unused_imports=False)
+        self._generated_files.append(file_path.name)
+
+    def _generate_custom_fields_typing(self):
+        assert self.custom_fields_typing_generator is not None
+        file_path = self.package_path / "custom_typing_fields.py"
+        module = self.custom_fields_typing_generator.generate()
+        code = self._add_comments_to_code(ast_to_raw_str(module))
+        self._write_generated_file(file_path, code, remove_unused_imports=False)
+        self._generated_files.append(file_path.name)
+
+    def _generate_custom_fields(self):
+        assert self.custom_fields_generator is not None
+        file_path = self.package_path / "custom_fields.py"
+        module = self.custom_fields_generator.generate()
+        code = self._add_comments_to_code(ast_to_raw_str(module))
+        self._write_generated_file(file_path, code, remove_unused_imports=False)
+        self._generated_files.append(file_path.name)
 
 
 def get_package_generator(
