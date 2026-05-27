@@ -262,7 +262,7 @@ class PackageGenerator:
         }
 
     def _apply_operation(self, result: dict) -> None:
-        """Apply the computed result to shared generator state (must run sequentially)."""
+        """Apply the computed result to shared generator state (sequential)."""
         self._unpacked_fragments = self._unpacked_fragments.union(
             result["unpacked_fragments"]
         )
