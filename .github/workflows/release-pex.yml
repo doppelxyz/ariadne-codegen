@@ -39,6 +39,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup Aikido Safe Chain
+        uses: ./.github/actions/setup-safe-chain
+
       - name: Install pex
         run: pip install "pex>=2.20,<3"
 
