@@ -16,7 +16,6 @@ from ..settings import ClientSettings, CommentsStrategy
 from ..utils import (
     add_extra_to_base_model,
     ast_to_raw_str,
-    ast_to_str,
     batch_format_files,
     process_name,
     str_to_pascal_case,
@@ -192,7 +191,7 @@ class PackageGenerator:
         self._generate_enums()
         self._generate_init()
 
-        # Single batch ruff pass over all generated files instead of per-file subprocess calls
+        # Single batch ruff pass over all generated files instead of per-file calls.
         batch_format_files(self._format_with_f401, self._format_without_f401)
 
         return sorted(self._generated_files)
@@ -200,7 +199,7 @@ class PackageGenerator:
     def _write_generated_file(
         self, file_path: Path, code: str, *, remove_unused_imports: bool = True
     ) -> None:
-        """Write raw (unformatted) code to file and register it for batch ruff formatting."""
+        """Write raw (unformatted) code and register it for batch ruff formatting."""
         file_path.write_text(code)
         if remove_unused_imports:
             self._format_with_f401.append(file_path)
