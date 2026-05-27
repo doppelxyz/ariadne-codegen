@@ -310,19 +310,39 @@ def get_variable_indent_size(source: str) -> int:
 
 
 def format_multiline_strings(source: str, offset: int = 4) -> str:
-    """Fromats multiline string declarations."""
-    formatted_source = source
-    for match in re.finditer(r".*?=.*?('.*?'\s*){2,}", source):
+    """Formats adjacent implicit string concatenations into triple-quoted strings.
+
+    ast.unparse() renders per-line query strings as adjacent single-quoted
+    literals like ``gql('line1\\n''line2\\n'...)``.  This function converts
+    those into readable triple-quoted ``gql(\"\"\"\\n    line1\\n    \"\"\")``
+    form.
+
+    Uses a non-backtracking pattern (``[^=\\n]+=``) so it stays O(n) even
+    on very large files with many non-matching lines.
+    """
+    # Fast exit: adjacent string literals always produce '' in the source.
+    if "''" not in source:
+        return source
+
+    def _replacer(match: re.Match) -> str:
         line = match.group()
         variable_indent_size = get_variable_indent_size(line)
-        orginal_str_match = re.search("'.*'", line)
-        if orginal_str_match:
-            orginal_str = orginal_str_match.group()
-            formatted = convert_to_multiline_string(
-                orginal_str, variable_indent_size=variable_indent_size, offset=offset
+        original_str_match = re.search("'.*'", line)
+        if original_str_match:
+            original_str = original_str_match.group()
+            return line.replace(
+                original_str,
+                convert_to_multiline_string(
+                    original_str,
+                    variable_indent_size=variable_indent_size,
+                    offset=offset,
+                ),
             )
-            formatted_source = formatted_source.replace(orginal_str, formatted)
-    return formatted_source
+        return line
+
+    # [^=\n]+ avoids backtracking across = signs; single-line bounds prevent
+    # .* from expanding across lines.
+    return re.sub(r"[^=\n]+=.*?('.*?'\s*){2,}", _replacer, source)
 
 
 def process_name(
