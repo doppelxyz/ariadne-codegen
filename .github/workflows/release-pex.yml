@@ -43,7 +43,9 @@ jobs:
         uses: ./.github/actions/setup-safe-chain
 
       - name: Install pex
-        run: pip install "pex>=2.20,<3"
+        # pex is a build tool (not a runtime dep); skip the age gate since we
+        # need the latest version and it is a well-audited packaging utility.
+        run: pip install "pex>=2.20,<3" --safe-chain-skip-minimum-package-age
 
       - name: Build PEX
         env:
