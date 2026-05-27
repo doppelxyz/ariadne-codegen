@@ -17,6 +17,109 @@ from .plugins.manager import PluginManager
 _LINE_LENGTH = 88
 _TARGET_VERSION = "py310"
 _SUBPROCESS_TIMEOUT = 30
+# Generous per-file budget multiplied by file count for batch operations
+_BATCH_TIMEOUT_PER_FILE = 5
+
+
+def ast_to_raw_str(
+    ast_obj: ast.AST,
+    multiline_strings: bool = False,
+    multiline_strings_offset: int = 4,
+) -> str:
+    """Convert ast object to string WITHOUT ruff formatting.
+
+    Use this together with ``batch_format_files`` to format many files in a
+    single ruff invocation instead of one subprocess call per file.
+    """
+    code = ast.unparse(ast_obj)
+    code = remove_blank_line_between_class_and_content(code)
+    if multiline_strings:
+        code = format_multiline_strings(code, offset=multiline_strings_offset)
+    return code
+
+
+def batch_format_files(
+    files_with_f401: list[Path],
+    files_without_f401: list[Path],
+) -> None:
+    """Format all provided files with ruff using only 2-3 subprocess calls total.
+
+    This is far faster than calling ruff once per file (the default behaviour).
+    ``files_with_f401`` will have unused-import removal applied; files in
+    ``files_without_f401`` only get import sorting and formatting.
+    """
+    all_files = files_with_f401 + files_without_f401
+    if not all_files:
+        return
+
+    timeout = max(_SUBPROCESS_TIMEOUT, _BATCH_TIMEOUT_PER_FILE * len(all_files))
+
+    if files_with_f401:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--fix",
+                "--isolated",
+                "--select",
+                "I,F401",
+                "--target-version",
+                _TARGET_VERSION,
+                "--line-length",
+                str(_LINE_LENGTH),
+            ]
+            + [str(f) for f in files_with_f401],
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    if files_without_f401:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--fix",
+                "--isolated",
+                "--select",
+                "I",
+                "--target-version",
+                _TARGET_VERSION,
+                "--line-length",
+                str(_LINE_LENGTH),
+            ]
+            + [str(f) for f in files_without_f401],
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "format",
+            "--isolated",
+            "--target-version",
+            _TARGET_VERSION,
+            "--line-length",
+            str(_LINE_LENGTH),
+        ]
+        + [str(f) for f in all_files],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ruff format failed (exit code {result.returncode}): {result.stderr}"
+        )
 
 
 def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:

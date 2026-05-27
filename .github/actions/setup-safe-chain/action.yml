@@ -1,0 +1,65 @@
+name: 'Setup Aikido Safe Chain (CI)'
+description: >
+  Installs a pinned safe-chain release after verifying the installer script SHA-256 (no curl-to-sh).
+  Sets SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS so npm/PyPI installs are blocked when versions are too new.
+  Bump SAFE_CHAIN_VERSION and SAFE_CHAIN_INSTALL_SCRIPT_SHA256 together (digest from GitHub release asset API).
+
+inputs:
+  minimum_package_age_hours:
+    description: 'Minimum age in hours before a package version may be installed (npm and PyPI per safe-chain).'
+    required: false
+    default: '72'
+  safe_chain_version:
+    description: 'The version of safe-chain to install.'
+    required: false
+    default: '1.4.6'
+  safe_chain_install_script_sha256:
+    description: 'The SHA-256 of the safe-chain install script.'
+    required: false
+    default: '1c49baa0d40285cf249364c5274ae2d0f11a5c65fb3aae23750dd06f91d9a356'
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Aikido Safe Chain binary
+      id: safe-chain-cache
+      uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      env:
+        SAFE_CHAIN_VERSION: ${{ inputs.safe_chain_version }}
+      with:
+        path: ~/.safe-chain
+        key: safe-chain-${{ runner.os }}-${{ runner.arch }}-${{ env.SAFE_CHAIN_VERSION }}
+
+    - name: Install Aikido Safe Chain (pinned + SHA-256 verified)
+      if: steps.safe-chain-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        # Pinned release: update both when bumping — SHA-256 is the GitHub "digest" for install-safe-chain.sh
+        # curl -sL https://api.github.com/repos/AikidoSec/safe-chain/releases/tags/<tag> | jq -r '.assets[] | select(.name=="install-safe-chain.sh") | .digest'
+        SAFE_CHAIN_VERSION: ${{ inputs.safe_chain_version }}
+        SAFE_CHAIN_INSTALL_SCRIPT_SHA256: ${{ inputs.safe_chain_install_script_sha256 }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        url="https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/install-safe-chain.sh"
+        tmp="$(mktemp)"
+        curl -fsSL "$url" -H "Authorization: Bearer $GITHUB_TOKEN" -o "$tmp"
+        actual=$(sha256sum "$tmp" | awk '{print $1}')
+        if [ "$actual" != "$SAFE_CHAIN_INSTALL_SCRIPT_SHA256" ]; then
+          echo "::error::safe-chain install script SHA-256 mismatch (expected ${SAFE_CHAIN_INSTALL_SCRIPT_SHA256}, got ${actual}). Refusing to run."
+          rm -f "$tmp"
+          exit 1
+        fi
+        bash "$tmp" --ci
+        rm -f "$tmp"
+    - name: Configure Aikido Safe Chain
+      shell: bash
+      env:
+        SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS: ${{ inputs.minimum_package_age_hours }}
+      run: |
+        echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+        echo "$HOME/.safe-chain/bin" >> "$GITHUB_PATH"
+        {
+          echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS}"
+          echo "SAFE_CHAIN_LOGGING=silent"
+        } >> "$GITHUB_ENV"

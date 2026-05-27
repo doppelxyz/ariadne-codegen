@@ -1,0 +1,126 @@
+name: Release PEX
+
+# Builds platform-specific PEX files, packages them as tar.gz archives for
+# dotslash consumption, and publishes them to a rolling "latest" GitHub
+# pre-release on every push to main.  Each PEX bundles ariadne-codegen and
+# all its dependencies (including ruff and pydantic-core which ship
+# platform-specific binaries) into a single executable artifact.
+#
+# Consumers use tools/bin/ariadne-codegen (a dotslash entry) which downloads
+# the matching tar.gz and caches it automatically.  ariadne-plugins is
+# injected at runtime via PEX_PATH by the doppie CLI.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build PEX (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Setup Aikido Safe Chain
+        uses: ./.github/actions/setup-safe-chain
+
+      - name: Install pex
+        run: pip install "pex>=2.20,<3"
+
+      - name: Build PEX
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          pex . \
+            --interpreter-constraint "CPython==3.11.*" \
+            --python-shebang "/usr/bin/env python3" \
+            -m ariadne_codegen \
+            --no-emit-warnings \
+            --compress \
+            -o ariadne-codegen
+
+          chmod +x ariadne-codegen
+
+      - name: Smoke test
+        run: python ariadne-codegen --version
+
+      - name: Package as tar.gz for dotslash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          tar -czf "ariadne-codegen-${PLATFORM}.tar.gz" ariadne-codegen
+
+      - name: Print dotslash checksums
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          echo "=== dotslash manifest values for ${PLATFORM} ==="
+          if command -v sha256sum &>/dev/null; then
+            DIGEST=$(sha256sum "ariadne-codegen-${PLATFORM}.tar.gz" | awk '{print $1}')
+          else
+            DIGEST=$(shasum -a 256 "ariadne-codegen-${PLATFORM}.tar.gz" | awk '{print $1}')
+          fi
+          SIZE=$(wc -c < "ariadne-codegen-${PLATFORM}.tar.gz")
+          echo "  platform: ${PLATFORM}"
+          echo "  size:     ${SIZE}"
+          echo "  digest:   ${DIGEST}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pex-${{ matrix.platform }}
+          path: ariadne-codegen-${{ matrix.platform }}.tar.gz
+
+  release:
+    name: Publish to latest release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pex-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: ls -lh dist/
+
+      - name: Delete existing latest release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes 2>/dev/null || true
+
+      - name: Create latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          gh release create latest \
+            --repo "${{ github.repository }}" \
+            --title "Latest (${SHORT_SHA})" \
+            --notes "Rolling release from \`main\`. Built from commit [${SHORT_SHA}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})." \
+            --prerelease \
+            dist/*.tar.gz
