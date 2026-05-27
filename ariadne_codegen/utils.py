@@ -2,6 +2,7 @@ import ast
 import builtins
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,14 +23,29 @@ _SUBPROCESS_TIMEOUT = 30
 _BATCH_TIMEOUT_PER_FILE = 5
 
 
-def _ruff_env() -> dict[str, str]:
-    """Return an env dict that lets ruff subprocesses find bundled packages.
+def _ruff_cmd() -> list[str]:
+    """Return the command prefix to invoke ruff.
 
+    Prefer the standalone ``ruff`` binary on PATH (faster, no Python startup,
+    works without PYTHONPATH tricks).  Fall back to ``python -m ruff`` when
+    the binary is absent (e.g. ruff is only available as a bundled PEX dep).
+    """
+    if shutil.which("ruff"):
+        return ["ruff"]
+    return [sys.executable, "-m", "ruff"]
+
+
+def _ruff_env() -> dict[str, str] | None:
+    """Return an env dict that lets ``python -m ruff`` find bundled packages.
+
+    Only needed when falling back to ``python -m ruff`` (no standalone binary).
     Inside a PEX the deps are extracted to disk and listed in sys.path, but
     spawned subprocesses don't inherit those paths.  Exporting them via
-    PYTHONPATH makes ``python -m ruff`` work regardless of whether we are
-    running inside a PEX or a plain virtualenv.
+    PYTHONPATH fixes this.  Returns None when the standalone binary is used
+    (no env manipulation needed).
     """
+    if shutil.which("ruff"):
+        return None
     env = os.environ.copy()
     pex_paths = os.pathsep.join(p for p in sys.path if p)
     if pex_paths:
@@ -71,14 +87,13 @@ def batch_format_files(
 
     timeout = max(_SUBPROCESS_TIMEOUT, _BATCH_TIMEOUT_PER_FILE * len(all_files))
 
+    ruff = _ruff_cmd()
     ruff_env = _ruff_env()
 
     if files_with_f401:
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "ruff",
+            ruff
+            + [
                 "check",
                 "--fix",
                 "--isolated",
@@ -98,10 +113,8 @@ def batch_format_files(
 
     if files_without_f401:
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "ruff",
+            ruff
+            + [
                 "check",
                 "--fix",
                 "--isolated",
@@ -120,10 +133,8 @@ def batch_format_files(
         )
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ruff",
+        ruff
+        + [
             "format",
             "--isolated",
             "--target-version",
@@ -162,13 +173,12 @@ def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:
     ) as f:
         f.write(code)
         tmp_path = f.name
+    ruff = _ruff_cmd()
     ruff_env = _ruff_env()
     try:
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "ruff",
+            ruff
+            + [
                 "check",
                 "--fix",
                 "--isolated",
@@ -190,10 +200,8 @@ def _format_code(code: str, *, remove_unused_imports: bool = True) -> str:
         Path(tmp_path).unlink(missing_ok=True)
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ruff",
+        ruff
+        + [
             "format",
             "--isolated",
             "--target-version",
