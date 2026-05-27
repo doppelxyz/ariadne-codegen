@@ -1,13 +1,14 @@
 name: Release PEX
 
-# Builds platform-specific PEX files and publishes them to a rolling
-# "latest" GitHub pre-release on every push to main.  Each PEX bundles
-# ariadne-codegen and all its dependencies (including ruff and pydantic-core
-# which ship platform-specific binaries) into a single executable artifact.
+# Builds platform-specific PEX files, packages them as tar.gz archives for
+# dotslash consumption, and publishes them to a rolling "latest" GitHub
+# pre-release on every push to main.  Each PEX bundles ariadne-codegen and
+# all its dependencies (including ruff and pydantic-core which ship
+# platform-specific binaries) into a single executable artifact.
 #
-# Consumers (e.g. the Doppel monorepo doppie CLI) download the matching PEX
-# for their platform and combine it with a locally-built ariadne-plugins PEX
-# via PEX_PATH at runtime.
+# Consumers use tools/bin/ariadne-codegen (a dotslash entry) which downloads
+# the matching tar.gz and caches it automatically.  ariadne-plugins is
+# injected at runtime via PEX_PATH by the doppie CLI.
 
 on:
   push:
@@ -32,9 +33,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.11"
 
@@ -42,6 +43,8 @@ jobs:
         run: pip install "pex>=2.20,<3"
 
       - name: Build PEX
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           pex . \
             --interpreter-constraint "CPython==3.11.*" \
@@ -49,18 +52,39 @@ jobs:
             -m ariadne_codegen \
             --no-emit-warnings \
             --compress \
-            -o "ariadne-codegen-${{ matrix.platform }}.pex"
+            -o ariadne-codegen
 
-          chmod +x "ariadne-codegen-${{ matrix.platform }}.pex"
+          chmod +x ariadne-codegen
 
       - name: Smoke test
-        run: python "ariadne-codegen-${{ matrix.platform }}.pex" --version
+        run: python ariadne-codegen --version
+
+      - name: Package as tar.gz for dotslash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          tar -czf "ariadne-codegen-${PLATFORM}.tar.gz" ariadne-codegen
+
+      - name: Print dotslash checksums
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          echo "=== dotslash manifest values for ${PLATFORM} ==="
+          if command -v sha256sum &>/dev/null; then
+            DIGEST=$(sha256sum "ariadne-codegen-${PLATFORM}.tar.gz" | awk '{print $1}')
+          else
+            DIGEST=$(shasum -a 256 "ariadne-codegen-${PLATFORM}.tar.gz" | awk '{print $1}')
+          fi
+          SIZE=$(wc -c < "ariadne-codegen-${PLATFORM}.tar.gz")
+          echo "  platform: ${PLATFORM}"
+          echo "  size:     ${SIZE}"
+          echo "  digest:   ${DIGEST}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pex-${{ matrix.platform }}
-          path: ariadne-codegen-${{ matrix.platform }}.pex
+          path: ariadne-codegen-${{ matrix.platform }}.tar.gz
 
   release:
     name: Publish to latest release
@@ -68,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: pex-*
           path: dist/
@@ -96,4 +120,4 @@ jobs:
             --title "Latest (${SHORT_SHA})" \
             --notes "Rolling release from \`main\`. Built from commit [${SHORT_SHA}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})." \
             --prerelease \
-            dist/*.pex
+            dist/*.tar.gz
