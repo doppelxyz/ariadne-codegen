@@ -12,7 +12,6 @@ from ..exceptions import ParsingError
 from ..plugins.manager import PluginManager
 from ..settings import ClientSettings, CommentsStrategy
 from ..utils import (
-    add_extra_to_base_model,
     ast_to_raw_str,
     batch_format_files,
     process_name,
