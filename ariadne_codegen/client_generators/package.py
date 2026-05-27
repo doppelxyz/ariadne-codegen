@@ -1,4 +1,5 @@
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -207,6 +208,17 @@ class PackageGenerator:
             self._format_without_f401.append(file_path)
 
     def add_operation(self, definition: OperationDefinitionNode):
+        """Compute and immediately apply a single operation (sequential path)."""
+        result = self._compute_operation(definition)
+        self._apply_operation(result)
+
+    def _compute_operation(self, definition: OperationDefinitionNode) -> dict:
+        """CPU-heavy part: build the result-type AST for one operation.
+
+        This method is stateless with respect to the PackageGenerator — it only
+        reads immutable data (schema, fragments_definitions) so it is safe to
+        call concurrently from a thread pool.
+        """
         name = definition.name
         if not name:
             raise ParsingError("Query without name.")
@@ -234,22 +246,33 @@ class PackageGenerator:
             default_optional_fields_to_none=self.default_optional_fields_to_none,
             include_typename=self.include_typename,
         )
-        self._unpacked_fragments = self._unpacked_fragments.union(
-            query_types_generator.get_unpacked_fragments()
-        )
-        self._used_enums.extend(query_types_generator.get_used_enums())
-        self._result_types_files[file_name] = query_types_generator.generate()
-        operation_str = query_types_generator.get_operation_as_str()
-        self.init_generator.add_import(
-            query_types_generator.get_generated_public_names(), module_name, 1
-        )
+        return {
+            "file_name": file_name,
+            "module": query_types_generator.generate(),
+            "operation_str": query_types_generator.get_operation_as_str(),
+            "public_names": query_types_generator.get_generated_public_names(),
+            "unpacked_fragments": query_types_generator.get_unpacked_fragments(),
+            "used_enums": query_types_generator.get_used_enums(),
+            "definition": definition,
+            "method_name": method_name,
+            "return_type_name": return_type_name,
+            "module_name": module_name,
+        }
 
+    def _apply_operation(self, result: dict) -> None:
+        """Apply the computed result to shared generator state (must run sequentially)."""
+        self._unpacked_fragments = self._unpacked_fragments.union(
+            result["unpacked_fragments"]
+        )
+        self._used_enums.extend(result["used_enums"])
+        self._result_types_files[result["file_name"]] = result["module"]
+        self.init_generator.add_import(result["public_names"], result["module_name"], 1)
         self.client_generator.add_method(
-            definition=definition,
-            name=method_name,
-            return_type=return_type_name,
-            return_type_module=module_name,
-            operation_str=operation_str,
+            definition=result["definition"],
+            name=result["method_name"],
+            return_type=result["return_type_name"],
+            return_type_module=result["module_name"],
+            operation_str=result["operation_str"],
             async_=self.async_client,
         )
 
@@ -352,14 +375,22 @@ class PackageGenerator:
         )
 
     def _generate_result_types(self):
-        for file_name, module in self._result_types_files.items():
+        def _process_one(item: tuple[str, ast.Module]) -> Path:
+            file_name, module = item
             file_path = self.package_path / file_name
             code = self._add_comments_to_code(
                 ast_to_raw_str(module), self.queries_source
             )
             if self.plugin_manager:
                 code = self.plugin_manager.generate_result_types_code(code)
-            self._write_generated_file(file_path, code, remove_unused_imports=True)
+            file_path.write_text(code, encoding="utf-8")
+            return file_path
+
+        with ThreadPoolExecutor() as executor:
+            paths = list(executor.map(_process_one, self._result_types_files.items()))
+
+        for file_path in paths:
+            self._format_with_f401.append(file_path)
             self._generated_files.append(file_path.name)
 
     def _generate_fragments(self):

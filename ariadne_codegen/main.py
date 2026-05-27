@@ -1,4 +1,5 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import click
 from graphql import assert_valid_schema
@@ -82,8 +83,12 @@ def client(config_dict):
         settings=settings,
         plugin_manager=plugin_manager,
     )
-    for query in queries:
-        package_generator.add_operation(query)
+    # Compute each operation's result-type AST in parallel (read-only access to
+    # schema/fragments), then apply the results sequentially to shared state.
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(package_generator._compute_operation, queries))
+    for result in results:
+        package_generator._apply_operation(result)
     generated_files = package_generator.generate()
 
     sys.stdout.write("\nGenerated files:\n  " + "\n  ".join(generated_files) + "\n")
