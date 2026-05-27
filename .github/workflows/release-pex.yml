@@ -1,0 +1,99 @@
+name: Release PEX
+
+# Builds platform-specific PEX files and publishes them to a rolling
+# "latest" GitHub pre-release on every push to main.  Each PEX bundles
+# ariadne-codegen and all its dependencies (including ruff and pydantic-core
+# which ship platform-specific binaries) into a single executable artifact.
+#
+# Consumers (e.g. the Doppel monorepo doppie CLI) download the matching PEX
+# for their platform and combine it with a locally-built ariadne-plugins PEX
+# via PEX_PATH at runtime.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build PEX (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pex
+        run: pip install "pex>=2.20,<3"
+
+      - name: Build PEX
+        run: |
+          pex . \
+            --interpreter-constraint "CPython==3.11.*" \
+            --python-shebang "/usr/bin/env python3" \
+            -m ariadne_codegen \
+            --no-emit-warnings \
+            --compress \
+            -o "ariadne-codegen-${{ matrix.platform }}.pex"
+
+          chmod +x "ariadne-codegen-${{ matrix.platform }}.pex"
+
+      - name: Smoke test
+        run: python "ariadne-codegen-${{ matrix.platform }}.pex" --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pex-${{ matrix.platform }}
+          path: ariadne-codegen-${{ matrix.platform }}.pex
+
+  release:
+    name: Publish to latest release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pex-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: ls -lh dist/
+
+      - name: Delete existing latest release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes 2>/dev/null || true
+
+      - name: Create latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          gh release create latest \
+            --repo "${{ github.repository }}" \
+            --title "Latest (${SHORT_SHA})" \
+            --notes "Rolling release from \`main\`. Built from commit [${SHORT_SHA}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})." \
+            --prerelease \
+            dist/*.pex
